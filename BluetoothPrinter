@@ -1,0 +1,2040 @@
+package com.offline.tbl;
+
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
+import android.graphics.Bitmap;
+import android.os.AsyncTask;
+import android.widget.Toast;
+
+import com.offline.tbl.base.ProApplication;
+import com.offline.tbl.bean.DateMonthlyDisplay;
+import com.offline.tbl.bean.TableNo.TableNo;
+import com.offline.tbl.bean.order.BillOrder;
+import com.offline.tbl.bean.order.BillOrderProduct;
+import com.offline.tbl.home.RealmQuery;
+import com.offline.tbl.pandingorderdetail.PendingOrderFullViewActivity;
+import com.offline.tbl.print.PrinterCommands;
+import com.offline.tbl.print.UnicodeFormatter;
+import com.offline.tbl.print.Utils;
+import com.offline.tbl.search_display.DisplaySearchResults;
+import com.socks.library.KLog;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+import java.util.UUID;
+
+import io.realm.Realm;
+import io.realm.RealmResults;
+
+public class BluetoothPrinter {
+
+    private int temp;
+
+    public static final int ALIGN_CENTER = 100;
+    public static final int ALIGN_RIGHT = 101;
+    public static final int ALIGN_LEFT = 102;
+
+    private static final byte[] NEW_LINE = {10};
+    private static final byte[] ESC_ALIGN_CENTER = new byte[]{0x1b, 'a', 0x01};
+    private static final byte[] ESC_ALIGN_RIGHT = new byte[]{0x1b, 'a', 0x02};
+    private static final byte[] ESC_ALIGN_LEFT = new byte[]{0x1b, 'a', 0x00};
+
+    private BluetoothDevice printer;
+    private BluetoothSocket btSocket = null;
+    private OutputStream btOutputStream = null;
+
+    public BluetoothPrinter(BluetoothDevice printer) {
+        this.printer = printer;
+    }
+
+    public void connectPrinter(final PrinterConnectListener listener) {
+        new ConnectTask(new ConnectTask.BtConnectListener() {
+            @Override
+            public void onConnected(BluetoothSocket socket) {
+                btSocket = socket;
+                try {
+                    btOutputStream = socket.getOutputStream();
+                    listener.onConnected();
+                } catch (IOException e) {
+                    listener.onFailed();
+                }
+            }
+
+            @Override
+            public void onFailed() {
+                listener.onFailed();
+            }
+        }).execute(printer);
+    }
+
+    public boolean isConnected() {
+        return btSocket != null && btSocket.isConnected();
+    }
+
+    public void finish() {
+        if (btSocket != null) {
+            try {
+                btOutputStream.close();
+                btSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            btSocket = null;
+        }
+    }
+
+   /* public boolean printText(String text) {
+        try {
+            btOutputStream.write(encodeNonAscii(text).getBytes());
+            return true;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }*/
+
+    public boolean printUnicode(byte[] data) {
+        try {
+            btOutputStream.write(data);
+            return true;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /* public boolean printLine() {
+         return printText("________________________________");
+     }
+ */
+    public boolean addNewLine() {
+        return printUnicode(NEW_LINE);
+    }
+
+    public int addNewLines(int count) {
+        int success = 0;
+        for (int i = 0; i < count; i++) {
+            if (addNewLine()) success++;
+        }
+
+        return success;
+    }
+
+    public boolean printImage(Bitmap bitmap) {
+        byte[] command = decodeBitmap(bitmap);
+        return printUnicode(command);
+    }
+
+    public void setAlign(int alignType) {
+        byte[] d;
+        switch (alignType) {
+            case ALIGN_CENTER:
+                d = ESC_ALIGN_CENTER;
+                break;
+            case ALIGN_LEFT:
+                d = ESC_ALIGN_LEFT;
+                break;
+            case ALIGN_RIGHT:
+                d = ESC_ALIGN_RIGHT;
+                break;
+            default:
+                d = ESC_ALIGN_LEFT;
+                break;
+        }
+
+        try {
+            btOutputStream.write(d);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void setLineSpacing(int lineSpacing) {
+        byte[] cmd = new byte[]{0x1B, 0x33, (byte) lineSpacing};
+        printUnicode(cmd);
+    }
+
+    public void setBold(boolean bold) {
+        byte[] cmd = new byte[]{0x1B, 0x45, bold ? (byte) 1 : 0};
+        printUnicode(cmd);
+    }
+
+    public void feedPaper() {
+        addNewLine();
+        addNewLine();
+        addNewLine();
+        addNewLine();
+    }
+
+    private static class ConnectTask extends AsyncTask<BluetoothDevice, Void, BluetoothSocket> {
+        private BtConnectListener listener;
+
+        private ConnectTask(BtConnectListener listener) {
+            this.listener = listener;
+        }
+
+        @Override
+        protected BluetoothSocket doInBackground(BluetoothDevice... bluetoothDevices) {
+            BluetoothDevice device = bluetoothDevices[0];
+            // UUID uuid = device.getUuids()[0].getUuid();
+            UUID uuid = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+
+            BluetoothSocket socket = null;
+            boolean connected = true;
+
+            try {
+                socket = device.createRfcommSocketToServiceRecord(uuid);
+            } catch (IOException e) {
+            }
+            try {
+                socket.connect();
+            } catch (IOException e) {
+                try {
+                    socket = (BluetoothSocket) device.getClass().getMethod("createRfcommSocket", new Class[]{int.class})
+                            .invoke(device, 1);
+                    socket.connect();
+                } catch (Exception e2) {
+                    connected = false;
+                }
+            }
+
+            return connected ? socket : null;
+        }
+
+        @Override
+        protected void onPostExecute(BluetoothSocket bluetoothSocket) {
+            if (listener != null) {
+                if (bluetoothSocket != null) listener.onConnected(bluetoothSocket);
+                else listener.onFailed();
+            }
+        }
+
+        private interface BtConnectListener {
+            void onConnected(BluetoothSocket socket);
+
+            void onFailed();
+        }
+    }
+
+    public interface PrinterConnectListener {
+        void onConnected();
+
+        void onFailed();
+    }
+
+    private static String encodeNonAscii(String text) {
+        return text.replace('á', 'a')
+                .replace('č', 'c')
+                .replace('ď', 'd')
+                .replace('é', 'e')
+                .replace('ě', 'e')
+                .replace('í', 'i')
+                .replace('ň', 'n')
+                .replace('ó', 'o')
+                .replace('ř', 'r')
+                .replace('š', 's')
+                .replace('ť', 't')
+                .replace('ú', 'u')
+                .replace('ů', 'u')
+                .replace('ý', 'y')
+                .replace('ž', 'z')
+                .replace('Á', 'A')
+                .replace('Č', 'C')
+                .replace('Ď', 'D')
+                .replace('É', 'E')
+                .replace('Ě', 'E')
+                .replace('Í', 'I')
+                .replace('Ň', 'N')
+                .replace('Ó', 'O')
+                .replace('Ř', 'R')
+                .replace('Š', 'S')
+                .replace('Ť', 'T')
+                .replace('Ú', 'U')
+                .replace('Ů', 'U')
+                .replace('Ý', 'Y')
+                .replace('Ž', 'Z');
+    }
+
+    public static byte[] decodeBitmap(Bitmap bmp) {
+        int bmpWidth = bmp.getWidth();
+        int bmpHeight = bmp.getHeight();
+
+        List<String> list = new ArrayList<>();
+        StringBuffer sb;
+        int zeroCount = bmpWidth % 8;
+        String zeroStr = "";
+        if (zeroCount > 0) {
+            for (int i = 0; i < (8 - zeroCount); i++) zeroStr = zeroStr + "0";
+        }
+
+        for (int i = 0; i < bmpHeight; i++) {
+            sb = new StringBuffer();
+            for (int j = 0; j < bmpWidth; j++) {
+                int color = bmp.getPixel(j, i);
+                int r = (color >> 16) & 0xff;
+                int g = (color >> 8) & 0xff;
+                int b = color & 0xff;
+                if (r > 160 && g > 160 && b > 160) sb.append("0");
+                else sb.append("1");
+            }
+            if (zeroCount > 0) sb.append(zeroStr);
+            list.add(sb.toString());
+        }
+
+        List<String> bmpHexList = binaryListToHexStringList(list);
+        String commandHexString = "1D763000";
+        String widthHexString = Integer
+                .toHexString(bmpWidth % 8 == 0 ? bmpWidth / 8 : (bmpWidth / 8 + 1));
+        if (widthHexString.length() > 2) {
+            return null;
+        } else if (widthHexString.length() == 1) {
+            widthHexString = "0" + widthHexString;
+        }
+        widthHexString = widthHexString + "00";
+
+        String heightHexString = Integer.toHexString(bmpHeight);
+        if (heightHexString.length() > 2) {
+            return null;
+        } else if (heightHexString.length() == 1) {
+            heightHexString = "0" + heightHexString;
+        }
+        heightHexString = heightHexString + "00";
+
+        List<String> commandList = new ArrayList<>();
+        commandList.add(commandHexString + widthHexString + heightHexString);
+        commandList.addAll(bmpHexList);
+
+        return hexList2Byte(commandList);
+    }
+
+    private static List<String> binaryListToHexStringList(List<String> list) {
+        List<String> hexList = new ArrayList<>();
+        for (String binaryStr : list) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < binaryStr.length(); i += 8) {
+                String str = binaryStr.substring(i, i + 8);
+                String hexString = strToHexString(str);
+                sb.append(hexString);
+            }
+            hexList.add(sb.toString());
+        }
+        return hexList;
+    }
+
+    private static String hexStr = "0123456789ABCDEF";
+    private static String[] binaryArray = {"0000", "0001", "0010", "0011",
+            "0100", "0101", "0110", "0111", "1000", "1001", "1010", "1011",
+            "1100", "1101", "1110", "1111"};
+
+    private static String strToHexString(String binaryStr) {
+        String hex = "";
+        String f4 = binaryStr.substring(0, 4);
+        String b4 = binaryStr.substring(4, 8);
+        for (int i = 0; i < binaryArray.length; i++) {
+            if (f4.equals(binaryArray[i]))
+                hex += hexStr.substring(i, i + 1);
+        }
+        for (int i = 0; i < binaryArray.length; i++) {
+            if (b4.equals(binaryArray[i]))
+                hex += hexStr.substring(i, i + 1);
+        }
+
+        return hex;
+    }
+
+    private static byte[] hexList2Byte(List<String> list) {
+        List<byte[]> commandList = new ArrayList<>();
+        for (String hexStr : list) commandList.add(hexStringToBytes(hexStr));
+        return sysCopy(commandList);
+    }
+
+    private static byte[] hexStringToBytes(String hexString) {
+        if (hexString == null || hexString.equals("")) return null;
+        hexString = hexString.toUpperCase();
+        int length = hexString.length() / 2;
+        char[] hexChars = hexString.toCharArray();
+        byte[] d = new byte[length];
+        for (int i = 0; i < length; i++) {
+            int pos = i * 2;
+            d[i] = (byte) (charToByte(hexChars[pos]) << 4 | charToByte(hexChars[pos + 1]));
+        }
+        return d;
+    }
+
+    private static byte[] sysCopy(List<byte[]> srcArrays) {
+        int len = 0;
+        for (byte[] srcArray : srcArrays) {
+            len += srcArray.length;
+        }
+        byte[] destArray = new byte[len];
+        int destLen = 0;
+        for (byte[] srcArray : srcArrays) {
+            System.arraycopy(srcArray, 0, destArray, destLen, srcArray.length);
+            destLen += srcArray.length;
+        }
+
+        return destArray;
+    }
+
+    private static byte charToByte(char c) {
+        return (byte) "0123456789ABCDEF".indexOf(c);
+    }
+
+    public BluetoothSocket getSocket() {
+        return btSocket;
+    }
+
+    public BluetoothDevice getDevice() {
+        return printer;
+    }
+
+
+    private void closeSocket(BluetoothSocket nOpenSocket) {
+        try {
+            nOpenSocket.close();
+            KLog.d("", "SocketClosed");
+        } catch (IOException ex) {
+            KLog.d("", "CouldNotCloseSocket");
+        }
+    }
+
+
+    public static byte intToByteArray(int value) {
+        byte[] b = ByteBuffer.allocate(4).putInt(value).array();
+
+        for (int k = 0; k < b.length; k++) {
+            System.out.println("Selva  [" + k + "] = " + "0x"
+                    + UnicodeFormatter.byteToHex(b[k]));
+        }
+
+        return b[3];
+    }
+
+    public byte[] sel(int val) {
+        ByteBuffer buffer = ByteBuffer.allocate(2);
+        buffer.putInt(val);
+        buffer.flip();
+        return buffer.array();
+    }
+
+    //print custom
+    private void printCustom(String msg, int size, int align) {
+        //Print config "mode"
+
+        byte[] cc = new byte[]{0x1B, 0x21, 0x00};  // 0- normal size text
+        byte[] cc1 = new byte[]{0x1B, 0x21, 0x70};  // 0- normal size text
+        byte[] bb = new byte[]{0x1B, 0x21, 0x08};  // 1- only bold text
+        byte[] bb2 = new byte[]{0x1B, 0x21, 0x20}; // 2- bold with medium text
+        byte[] bb3 = new byte[]{0x1B, 0x21, 0x10}; // 3- bold with large text
+        try {
+            switch (size) {
+                case 0:
+                    btOutputStream.write(cc);
+                    break;
+                case 1:
+                    btOutputStream.write(bb);
+                    break;
+                case 2:
+                    btOutputStream.write(bb2);
+                    break;
+                case 3:
+                    btOutputStream.write(bb3);
+                    break;
+                case 4:
+                    btOutputStream.write(cc1);
+            }
+
+            switch (align) {
+
+                case 0:
+                    //left align
+                    btOutputStream.write(PrinterCommands.ESC_ALIGN_LEFT);
+                    break;
+                case 1:
+                    //center align
+                    btOutputStream.write(PrinterCommands.ESC_ALIGN_CENTER);
+                    break;
+                case 2:
+                    //right align
+                    btOutputStream.write(PrinterCommands.ESC_ALIGN_RIGHT);
+                    break;
+            }
+            btOutputStream.write(msg.getBytes());
+            btOutputStream.write(PrinterCommands.LF);
+            //btOutputStream.write(cc);
+            //printNewLine();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+
+    //print unicode
+    public void printUnicode() {
+        try {
+            btOutputStream.write(PrinterCommands.ESC_ALIGN_CENTER);
+            printText(Utils.UNICODE_TEXT);
+        } catch (UnsupportedEncodingException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    //print new line
+    private void printNewLine() {
+        try {
+            btOutputStream.write(PrinterCommands.FEED_LINE);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    public void resetPrint() {
+        try {
+            btOutputStream.write(PrinterCommands.ESC_FONT_COLOR_DEFAULT);
+            btOutputStream.write(PrinterCommands.FS_FONT_ALIGN);
+            btOutputStream.write(PrinterCommands.ESC_ALIGN_LEFT);
+            btOutputStream.write(PrinterCommands.ESC_CANCEL_BOLD);
+            btOutputStream.write(PrinterCommands.LF);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    //print text
+    public void printText(String msg) {
+        try {
+            // Print normal text
+            btOutputStream.write(msg.getBytes());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    //print byte[]
+    private void printText(byte[] msg) {
+        try {
+            // Print normal text
+            btOutputStream.write(msg);
+            printNewLine();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private String leftRightAlign(String str1, String str2) {
+        String ans = str1 + str2;
+        if (ans.length() < 31) {
+            int n = (31 - str1.length() + str2.length());
+            ans = str1 + new String(new char[n]).replace("\0", " ") + str2;
+        }
+        return ans;
+    }
+
+
+    private String[] getDateTime() {
+        final Calendar c = Calendar.getInstance();
+        String dateTime[] = new String[2];
+        dateTime[0] = c.get(Calendar.DAY_OF_MONTH) + "/" + c.get(Calendar.MONTH) + "/" + c.get(Calendar.YEAR);
+        dateTime[1] = c.get(Calendar.HOUR_OF_DAY) + ":" + c.get(Calendar.MINUTE);
+        return dateTime;
+    }
+
+
+
+    /*Print final bill to give customer*/
+
+    public void printFinalBill(String id, String paymentMode) {
+
+        temp = 0;
+        // if (flag) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+                    Realm realm = Realm.getDefaultInstance();
+                    String amount = "", strPerTag = "";
+                    long subtotal = 0, gst = 0;
+                    BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, Integer.valueOf(id)).findFirst();
+                    if (billOrder != null) {
+
+
+                        String method = "";
+                        String space = " ";
+                        // String message = getMessage();
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+                            printCustom("Bollywood Lounge", 2, 1);
+                            printCustom("  ", 0, 0);
+
+                            method = "addText";
+                            printText("OrderNo:#" + billOrder.getBillId());
+                            printNewLine();
+                            method = "addText";
+                            printText("Date:" + billOrder.getBillOrderDateOnly() + " " + billOrder.getBillOrderDateTime());
+                            printNewLine();
+
+                            if (billOrder.getBillOrderName() != null) {
+                                if (!billOrder.getBillOrderName().isEmpty()) {
+                                    method = "addText";
+                                    KLog.e("NAME", billOrder.getBillOrderName() + " ");
+                                    printText(billOrder.getBillOrderName() + "  ");
+                                    printNewLine();
+
+                                }
+                            }
+
+                            if (billOrder.getBillOrderContectNo() != null) {
+                                if (!billOrder.getBillOrderContectNo().isEmpty()) {
+                                    method = "addText";
+                                    KLog.e("NAME", billOrder.getBillOrderContectNo());
+                                    printText(billOrder.getBillOrderContectNo());
+                                    printNewLine();
+                                }
+                            }
+
+                            if (billOrder.getBillOrderTableNo() != null) {
+                                method = "addText";
+                                printText("TableNo:" + billOrder.getBillOrderTableNo());
+                                printNewLine();
+                            }/* else {
+                                method = "addText";
+                                printText(billOrder.getBillOrderAddress());
+                                printNewLine();
+                            }*/
+                            method = "addText";
+                            printText("GST No. 24BFMPG2786P1ZS");
+                            printNewLine();
+
+                            method = "addText";
+                            printText(divederline48);
+                            printNewLine();
+
+                            method = "addText";
+                            printText("ITEM                          QTY   PRICE  TOTAL");
+                            method = "addText";
+                            printText(divederline48);
+
+                            for (int i = 0; i < billOrder.getBillOrderProductList().size(); i++) {
+
+                                /*Product Name*/
+                                String productName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName();
+                                String Qty, Amoun, Price;
+                                if (productName.length() > 30) {
+                                    productName = productName.substring(0, 27) + "...";
+                                } else {
+                                    int diff = 30 - productName.length();
+                                    String pSpace = "";
+                                    for (int pName = 0; pName < diff; pName++) {
+                                        pSpace = pSpace + space;
+                                    }
+
+                                    productName = productName + pSpace;
+                                }
+
+                                /*QTY*/
+                                int qty = 5 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductQty()).length();
+                                String pSpace = "";
+                                for (int Pqty = 0; Pqty < qty; Pqty++) {
+                                    pSpace = pSpace + space;
+                                }
+                                Qty = billOrder.getBillOrderProductList().get(i).getBillOrderProductQty() + pSpace;
+
+
+                                /*Amount*/
+
+                                int price = 6 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductPrice()).length();
+                                String proceSpace = "";
+                                for (int Pqty = 0; Pqty < price; Pqty++) {
+                                    proceSpace = proceSpace + space;
+                                }
+                                Price = proceSpace + billOrder.getBillOrderProductList().get(i).getBillOrderProductPrice();
+
+
+                                /*Total*/
+                                int amountCount = 7 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductTotalPrice()).length();
+                                String pAmount = "";
+                                for (int pam = 0; pam < amountCount; pam++) {
+                                    pAmount = pAmount + space;
+                                }
+                                Amoun = pAmount + billOrder.getBillOrderProductList().get(i).getBillOrderProductTotalPrice();
+
+                                printText(productName + Qty + Price + Amoun);
+                            }
+                            method = "addText";
+                            printText(divederline48);
+
+
+                            if (billOrder.getBillOrderProductList() != null) {
+                                int itemTag = 48 - ("TOTAL ITEMS".length() + String.valueOf(billOrder.getBillOrderProductList().size()).length());
+                                String itemDiff = "";
+                                for (int del = 0; del < itemTag; del++) {
+                                    itemDiff = itemDiff + space;
+                                }
+                                method = "addText";
+                                printText("TOTAL ITEMS" + itemDiff + billOrder.getBillOrderProductList().size());
+                            }
+
+
+                            if (billOrder.getBillOrderDiscountType() != null) {
+
+                                if (billOrder.getBillOrderDiscountType().equalsIgnoreCase("Rs")) {
+                                    strPerTag = "DISCOUNT";
+                                    amount = billOrder.getBillOrderDiscountl();
+                                } else {
+                                    strPerTag = "DISCOUNT(" + billOrder.getBillOrderDiscountl() + "%)";
+                                    amount = billOrder.getBillOrderDiscountPer();
+                                }
+
+
+                                subtotal = Long.valueOf(billOrder.getBillOrderTotal()) + Math.round(Double.valueOf(amount));
+                            } else {
+                                subtotal = Long.valueOf(billOrder.getBillOrderTotal());
+                            }
+
+                            if (!billOrder.getBillOrderSGST().equalsIgnoreCase("0")) {
+                                subtotal = subtotal - (Long.valueOf(billOrder.getBillOrderSGST()) + Long.valueOf(billOrder.getBillOrderCGST()));
+                                gst = Long.valueOf(billOrder.getBillOrderSGST());
+                            }
+
+                            int subtotaltag = 48 - ("SUB TOTAL".length() + String.valueOf(subtotal).length());
+                            String subtotalDiff = "";
+                            for (int sub = 0; sub < subtotaltag; sub++) {
+                                subtotalDiff = subtotalDiff + space;
+                            }
+
+                            method = "addText";
+                            printText("SUB TOTAL" + subtotalDiff + subtotal);
+                            printNewLine();
+
+                            if (billOrder.getBillOrderDiscountType() != null) {
+
+                                int discountTag = 48 - (strPerTag.length() + String.valueOf(amount).length());
+
+                                String discountDiif = "";
+                                for (int disc = 0; disc < discountTag; disc++) {
+                                    discountDiif = discountDiif + space;
+                                }
+                                method = "addText";
+                                printText(strPerTag + discountDiif + amount);
+                                printNewLine();
+                            }
+
+                            if (!billOrder.getBillOrderSGST().equalsIgnoreCase("0")) {
+                                int dilTag = 48 - ("SGST(2.5%)".length() + String.valueOf(gst).length());
+                                String dilDiff = "";
+                                for (int del = 0; del < dilTag; del++) {
+                                    dilDiff = dilDiff + space;
+                                }
+                                method = "addText";
+                                printText("SGST(2.5%)" + dilDiff + gst + "");
+                                printNewLine();
+                                printText("CGST(2.5%)" + dilDiff + gst + "");
+                                printNewLine();
+
+                            }
+
+                            if (billOrder.getBillOrderPaymentMode() != null) {
+                                int paymentMode = 48 - ("PAYMENT MODE".length() + billOrder.getBillOrderPaymentMode().length());
+                                String paymentDiff = "";
+                                for (int paymnet = 0; paymnet < paymentMode; paymnet++) {
+                                    paymentDiff = paymentDiff + space;
+                                }
+                                method = "addText";
+                                printText("PAYMENT MODE" + paymentDiff + billOrder.getBillOrderPaymentMode());
+                                printNewLine();
+                            }
+
+                            if (billOrder.getBillOrderTotal() != null) {
+                                int grandTotal = 48 - ("GRAND TOTAL".length() + billOrder.getBillOrderTotal().length());
+                                String grandTotalDiff = "";
+                                for (int total = 0; total < grandTotal; total++) {
+                                    grandTotalDiff = grandTotalDiff + space;
+                                }
+                                method = "addText";
+                                printText("GRAND TOTAL" + grandTotalDiff + billOrder.getBillOrderTotal());
+                                printNewLine();
+                            }
+
+
+                            if (billOrder.getBillOrderNote() != null && !billOrder.getBillOrderType().equalsIgnoreCase("dining")) {
+                                method = "addText";
+                                printText("NOTE:-" + billOrder.getBillOrderNote());
+                                method = "addText";
+                                printText(divederline48);
+                            } else {
+                                method = "addText";
+                                printText(divederline48);
+                            }
+
+                            method = "addText";
+                            // this.mPrinter.addTextAlign(Printer.ALIGN_CENTER);
+                            //this.mPrinter.addTextSize(1, 2);
+                            // if (billOrder.getBillOrderStatus().equalsIgnoreCase("Pending")) {
+                            printNewLine();
+                            printCustom(getMessage(), 0, 5);
+                            printNewLine();
+                            printNewLine();
+                            KLog.e(getMessage());
+                           /* } else if (billOrder.getBillOrderStatus().equalsIgnoreCase("Cancel")) {
+                                printText("Cancelled Order");
+                                printNewLine();
+                                printNewLine();
+                                KLog.e("Cancelled Order");
+                            } else if (billOrder.getBillOrderStatus().equalsIgnoreCase("Complete")) {
+                                printText("Duplicate");
+                                printNewLine();
+                                printNewLine();
+                                KLog.e("Duplicate");
+
+                            }
+*/
+
+                            printNewLine();
+                            printNewLine();
+                            temp = 1;
+                        } catch (Exception e) {
+                            temp = 0;
+                            KLog.e("Error", e.getMessage());
+                        }
+                        //  return true;
+                    }
+                } catch (Exception e) {
+                    // return false;
+                    temp = 0;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            if (temp == 1) {
+                Realm realm = Realm.getDefaultInstance();
+                BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, Integer.valueOf(id)).findFirst();
+                if (billOrder != null) {
+
+                    realm.beginTransaction();
+
+                    billOrder.setBillOrderPaymentMode(paymentMode);
+                    // printFinal = new PrintRecipt(PendingOrderFullViewActivity.this);
+                    //  printFinal.printFinal(id);
+                    billOrder.setBillOrderStatus("Complete");
+                    for (BillOrderProduct product : billOrder.getBillOrderProductList()) {
+
+                        product.setBillOrderProductStatus("Complete");
+
+                    }
+                    realm.commitTransaction();
+                    realm.close();
+
+                }
+                if (billOrder.getBillOrderTableNo() != null) {
+                    TableNo tableNo = realm.where(TableNo.class).equalTo(TableNo.TABLENAME, billOrder.getBillOrderTableNo()).findFirst();
+                    if (tableNo != null) {
+                        realm.beginTransaction();
+                        tableNo.setTableIsSelect(false);
+                        realm.commitTransaction();
+                    }
+                }
+
+                finish();
+
+            } else {
+                Toast.makeText(ProApplication.getContex(), "Something wrong check your printer", Toast.LENGTH_SHORT).show();
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    private String getMessage() {
+        return "Thank You! Visit us Again...              ";
+    }
+
+    /*Cancel and complete bill*/
+    public void printCancelCompleteBill(String id, String message) {
+
+
+        // if (flag) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+                    Realm realm = Realm.getDefaultInstance();
+                    String amount = "", strPerTag = "";
+                    long subtotal = 0, gst = 0;
+                    BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, Integer.valueOf(id)).findFirst();
+                    if (billOrder != null) {
+
+
+                        String method = "";
+                        String space = " ";
+                        // String message = getMessage();
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+                            printCustom("Bollywood Lounge", 2, 1);
+                            printCustom("  ", 0, 0);
+
+                            method = "addText";
+                            printText("OrderNo:#" + billOrder.getBillId());
+                            printNewLine();
+                            method = "addText";
+                            printText("Date:" + billOrder.getBillOrderDateOnly() + " " + billOrder.getBillOrderDateTime());
+                            printNewLine();
+
+                            if (billOrder.getBillOrderName() != null) {
+                                if (!billOrder.getBillOrderName().isEmpty()) {
+                                    method = "addText";
+                                    KLog.e("NAME", billOrder.getBillOrderName() + " ");
+                                    printText(billOrder.getBillOrderName() + "  ");
+
+                                }
+                            }
+
+                            if (billOrder.getBillOrderContectNo() != null) {
+                                if (!billOrder.getBillOrderContectNo().isEmpty()) {
+                                    method = "addText";
+                                    KLog.e("NAME", billOrder.getBillOrderContectNo());
+                                    printText(billOrder.getBillOrderContectNo());
+                                    printNewLine();
+                                }
+                            }
+
+                            if (billOrder.getBillOrderTableNo() != null) {
+                                method = "addText";
+                                printText("TableNo:" + billOrder.getBillOrderTableNo());
+                                printNewLine();
+                            } else {
+                                method = "addText";
+                                printText(billOrder.getBillOrderAddress());
+                                printNewLine();
+                            }
+                            method = "addText";
+                            printText(divederline48);
+                            printNewLine();
+
+                            method = "addText";
+                            printText("ITEM                          QTY   PRICE  TOTAL");
+                            method = "addText";
+                            printText(divederline48);
+
+                            for (int i = 0; i < billOrder.getBillOrderProductList().size(); i++) {
+
+                                /*Product Name*/
+                                String productName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName();
+                                String Qty, Amoun, Price;
+                                if (productName.length() > 30) {
+                                    productName = productName.substring(0, 27) + "...";
+                                } else {
+                                    int diff = 30 - productName.length();
+                                    String pSpace = "";
+                                    for (int pName = 0; pName < diff; pName++) {
+                                        pSpace = pSpace + space;
+                                    }
+
+                                    productName = productName + pSpace;
+                                }
+
+                                /*QTY*/
+                                int qty = 5 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductQty()).length();
+                                String pSpace = "";
+                                for (int Pqty = 0; Pqty < qty; Pqty++) {
+                                    pSpace = pSpace + space;
+                                }
+                                Qty = billOrder.getBillOrderProductList().get(i).getBillOrderProductQty() + pSpace;
+
+
+                                /*Amount*/
+
+                                int price = 6 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductPrice()).length();
+                                String proceSpace = "";
+                                for (int Pqty = 0; Pqty < price; Pqty++) {
+                                    proceSpace = proceSpace + space;
+                                }
+                                Price = proceSpace + billOrder.getBillOrderProductList().get(i).getBillOrderProductPrice();
+
+
+                                /*Total*/
+                                int amountCount = 7 - String.valueOf(billOrder.getBillOrderProductList().get(i).getBillOrderProductTotalPrice()).length();
+                                String pAmount = "";
+                                for (int pam = 0; pam < amountCount; pam++) {
+                                    pAmount = pAmount + space;
+                                }
+                                Amoun = pAmount + billOrder.getBillOrderProductList().get(i).getBillOrderProductTotalPrice();
+
+                                printText(productName + Qty + Price + Amoun);
+                            }
+                            method = "addText";
+                            printText(divederline48);
+
+
+                            if (billOrder.getBillOrderProductList() != null) {
+                                int itemTag = 48 - ("TOTAL ITEMS".length() + String.valueOf(billOrder.getBillOrderProductList().size()).length());
+                                String itemDiff = "";
+                                for (int del = 0; del < itemTag; del++) {
+                                    itemDiff = itemDiff + space;
+                                }
+                                method = "addText";
+                                printText("TOTAL ITEMS" + itemDiff + billOrder.getBillOrderProductList().size());
+                            }
+
+
+                            if (billOrder.getBillOrderDiscountType() != null) {
+
+                                if (billOrder.getBillOrderDiscountType().equalsIgnoreCase("Rs")) {
+                                    strPerTag = "DISCOUNT";
+                                    amount = billOrder.getBillOrderDiscountl();
+                                } else {
+                                    strPerTag = "DISCOUNT(" + billOrder.getBillOrderDiscountl() + "%)";
+                                    amount = billOrder.getBillOrderDiscountPer();
+                                }
+
+
+                                subtotal = Long.valueOf(billOrder.getBillOrderTotal()) + Math.round(Double.valueOf(amount));
+                            } else {
+                                subtotal = Long.valueOf(billOrder.getBillOrderTotal());
+                            }
+
+                            if (!billOrder.getBillOrderSGST().equalsIgnoreCase("0")) {
+                                subtotal = subtotal - (Long.valueOf(billOrder.getBillOrderSGST()) + Long.valueOf(billOrder.getBillOrderCGST()));
+                                gst = Long.valueOf(billOrder.getBillOrderSGST());
+                            }
+
+                            int subtotaltag = 48 - ("SUB TOTAL".length() + String.valueOf(subtotal).length());
+                            String subtotalDiff = "";
+                            for (int sub = 0; sub < subtotaltag; sub++) {
+                                subtotalDiff = subtotalDiff + space;
+                            }
+
+                            method = "addText";
+                            printText("SUB TOTAL" + subtotalDiff + subtotal);
+                            printNewLine();
+
+                            if (billOrder.getBillOrderDiscountType() != null) {
+
+                                int discountTag = 48 - (strPerTag.length() + String.valueOf(amount).length());
+
+                                String discountDiif = "";
+                                for (int disc = 0; disc < discountTag; disc++) {
+                                    discountDiif = discountDiif + space;
+                                }
+                                method = "addText";
+                                printText(strPerTag + discountDiif + amount);
+                                printNewLine();
+                            }
+
+                            if (!billOrder.getBillOrderSGST().equalsIgnoreCase("0")) {
+                                int dilTag = 48 - ("SGST(2.5%)".length() + String.valueOf(gst).length());
+                                String dilDiff = "";
+                                for (int del = 0; del < dilTag; del++) {
+                                    dilDiff = dilDiff + space;
+                                }
+                                method = "addText";
+                                printText("SGST(2.5%)" + dilDiff + gst + "");
+                                printNewLine();
+                                printText("CGST(2.5%)" + dilDiff + gst + "");
+                                printNewLine();
+
+                            }
+
+
+                            if (billOrder.getBillOrderPaymentMode() != null) {
+                                int paymentMode = 48 - ("PAYMENT MODE".length() + billOrder.getBillOrderPaymentMode().length());
+                                String paymentDiff = "";
+                                for (int paymnet = 0; paymnet < paymentMode; paymnet++) {
+                                    paymentDiff = paymentDiff + space;
+                                }
+                                method = "addText";
+                                printText("PAYMENT MODE" + paymentDiff + billOrder.getBillOrderPaymentMode());
+                                printNewLine();
+                            }
+
+                            if (billOrder.getBillOrderTotal() != null) {
+                                int grandTotal = 48 - ("GRAND TOTAL".length() + billOrder.getBillOrderTotal().length());
+                                String grandTotalDiff = "";
+                                for (int total = 0; total < grandTotal; total++) {
+                                    grandTotalDiff = grandTotalDiff + space;
+                                }
+                                method = "addText";
+                                printText("GRAND TOTAL" + grandTotalDiff + billOrder.getBillOrderTotal());
+                                printNewLine();
+                            }
+
+
+                            if (billOrder.getBillOrderNote() != null && !billOrder.getBillOrderType().equalsIgnoreCase("dining")) {
+                                method = "addText";
+                                printText("NOTE:-" + billOrder.getBillOrderNote());
+                                method = "addText";
+                                printText(divederline48);
+                            } else {
+                                method = "addText";
+                                printText(divederline48);
+                            }
+
+                            method = "addText";
+                            // this.mPrinter.addTextAlign(Printer.ALIGN_CENTER);
+                            //this.mPrinter.addTextSize(1, 2);
+                            // if (billOrder.getBillOrderStatus().equalsIgnoreCase("Pending")) {
+                            //  printCustom(getMessage(), 2, 5);
+                            //  printNewLine();
+                            // printNewLine();
+                            // KLog.e(getMessage());
+                            // } else if (billOrder.getBillOrderStatus().equalsIgnoreCase("Cancel")) {
+                            printText(message);
+                            printNewLine();
+                            printNewLine();
+                            KLog.e(message);
+                            // } else if (billOrder.getBillOrderStatus().equalsIgnoreCase("Complete")) {
+                            // printText("Duplicate");
+                            //  printNewLine();
+                            //  printNewLine();
+                            // KLog.e("Duplicate");
+
+                            // }
+
+
+                            printNewLine();
+                            printNewLine();
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                        //  return true;
+                    } else {
+                    }
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            finish();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    /*Print KOT*/
+    public void printKOTOnly(int current_Id) {
+
+
+        //progressDialog.show();
+
+        KLog.e("Main", "Exe " + current_Id);
+
+        // if (flag) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+                    Realm realm = Realm.getDefaultInstance();
+                    BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, current_Id).findFirst();
+
+                    if (billOrder != null) {
+
+                        String method = "";
+                        String space = " ";
+                        String message = getMessage();
+
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline32 = "--------------------------------";
+
+                        method = "addTextAlign";
+                        try {
+
+                            printCustom("K.O.T", 2, 1);
+                            printCustom("  ", 0, 0);
+                            method = "addText";
+                            printText("OrderNo:#" + billOrder.getBillId());
+                            printNewLine();
+                            method = "addText";
+                            printText("Date:" + billOrder.getBillOrderDateOnly() + " " + billOrder.getBillOrderDateTime());
+                            printNewLine();
+                            if (billOrder.getBillOrderTableNo() != null) {
+                                method = "addText";
+                                printText("TableNo:" + billOrder.getBillOrderTableNo());
+                                printNewLine();
+                            }
+                            method = "addText";
+                            printText("Item:" + billOrder.getBillOrderProductList().size());
+                            printNewLine();
+                            method = "addText";
+                            printText(divederline32);
+                            method = "addText";
+                            printText("ITEM                         QTY");
+                            method = "addText";
+                            printText(divederline32);
+
+                            for (int i = 0; i < billOrder.getBillOrderProductList().size(); i++) {
+                                String spaceBwNameAndQty = "";
+                                String pName = "";
+                                int name = billOrder.getBillOrderProductList().get(i).getBillOrderProductName().length();
+                                int qty = billOrder.getBillOrderProductList().get(i).getBillOrderProductQty().toString().length();
+                                if (name > 26) {
+                                    pName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName().substring(0, 23) + "...";
+                                } else {
+                                    pName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName();
+                                }
+
+                                KLog.e("size ", "size print " + pName.length() + qty);
+                                for (int p = 0; p < 32 - (pName.length() + qty); p++) {
+                                    spaceBwNameAndQty = spaceBwNameAndQty + space;
+                                }
+
+                                method = "addText";
+                                printText(pName + spaceBwNameAndQty + billOrder.getBillOrderProductList().get(i).getBillOrderProductQty());
+                            }
+
+                            method = "addText";
+                            printText(divederline32);
+                            if (billOrder.getBillOrderNote() != null) {
+                                method = "addText";
+                                printText("NOTE:-" + billOrder.getBillOrderNote());
+                            }
+                            method = "addFeedLine";
+                            printNewLine();
+                            method = "addCut";
+                            printNewLine();
+                            printNewLine();
+
+                            temp = 1;
+                        } catch (Exception e) {
+                            temp = 0;
+                            KLog.e("Error", e.getMessage());
+                        }
+
+                    }
+
+
+                } catch (Exception e) {
+                    temp = 0;
+                    KLog.e("Main", "Exe ", e);
+                    KLog.e("tesr ", "exception in print " + e.toString());
+
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            if (temp == 1) {
+                Realm realm = Realm.getDefaultInstance();
+                BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, current_Id).findFirst();
+                realm.beginTransaction();
+                if (billOrder != null) {
+                    billOrder.setBillOrderStatus("Pending");
+                }
+                realm.commitTransaction();
+                realm.close();
+
+
+                KLog.e("Main", "Exe " + current_Id);
+            } else {
+                Toast.makeText(ProApplication.getContex(), "Something wrong check your printer", Toast.LENGTH_SHORT).show();
+            }
+            // progressDialog.dismiss();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /*PrintAddItemKOT*/
+    public void printKOTOnly(int pendingId, String table, String nots) {
+        temp = 0;
+
+        // if (flag) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+                    Realm realm = Realm.getDefaultInstance();
+                    BillOrder billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, 0).findFirst();
+
+                    if (billOrder != null) {
+
+                        String method = "";
+                        String space = " ";
+                        String message = getMessage();
+
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline32 = "--------------------------------";
+
+                        method = "addTextAlign";
+                        try {
+
+                            printCustom("K.O.T", 2, 1);
+                            printCustom("  ", 0, 0);
+                            method = "addText";
+                            printText("OrderNo:#" + pendingId);
+                            printNewLine();
+                            method = "addText";
+                            printText("Date:" + billOrder.getBillOrderDateOnly() + " " + billOrder.getBillOrderDateTime());
+                            printNewLine();
+                            if (billOrder.getBillOrderTableNo() != null) {
+                                method = "addText";
+                                printText("TableNo:" + table);
+                                printNewLine();
+                            }
+                            method = "addText";
+                            printText("Item:" + billOrder.getBillOrderProductList().size());
+                            printNewLine();
+                            method = "addText";
+                            printText(divederline32);
+                            method = "addText";
+                            printText("ITEM                         QTY");
+                            method = "addText";
+                            printText(divederline32);
+
+                            for (int i = 0; i < billOrder.getBillOrderProductList().size(); i++) {
+                                String spaceBwNameAndQty = "";
+                                String pName = "";
+                                int name = billOrder.getBillOrderProductList().get(i).getBillOrderProductName().length();
+                                int qty = billOrder.getBillOrderProductList().get(i).getBillOrderProductQty().toString().length();
+                                if (name > 26) {
+                                    pName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName().substring(0, 23) + "...";
+                                } else {
+                                    pName = billOrder.getBillOrderProductList().get(i).getBillOrderProductName();
+                                }
+
+                                KLog.e("size ", "size print " + pName.length() + qty);
+                                for (int p = 0; p < 32 - (pName.length() + qty); p++) {
+                                    spaceBwNameAndQty = spaceBwNameAndQty + space;
+                                }
+
+                                method = "addText";
+                                printText(pName + spaceBwNameAndQty + billOrder.getBillOrderProductList().get(i).getBillOrderProductQty());
+                            }
+
+                            method = "addText";
+                            printText(divederline32);
+                            if (!nots.trim().isEmpty()) {
+                                method = "addText";
+                                printText("NOTE:-" + nots);
+                            }
+                            method = "addFeedLine";
+                            printNewLine();
+                            method = "addCut";
+                            printNewLine();
+                            printNewLine();
+                            temp = 1;
+
+                        } catch (Exception e) {
+                            temp = 0;
+                            KLog.e("Error", e.getMessage());
+                        }
+
+                    }
+
+
+                } catch (Exception e) {
+                    temp = 0;
+                    KLog.e("Main", "Exe ", e);
+                    KLog.e("tesr ", "exception in print " + e.toString());
+
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            if (temp == 1) {
+                Realm realm = Realm.getDefaultInstance();
+                BillOrder pendingBill = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, pendingId).findFirst();
+                BillOrder kotBill = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, 0).findFirst();
+                if (pendingBill != null && kotBill != null) {
+
+
+
+                    /*if (printKOT.printMYBILL(0 + "", false, bundle, edt_note.getText().toString())) {*/
+                    String note = pendingBill.getBillOrderNote();
+                    realm.beginTransaction();
+                    if (note != null) {
+                        note = note + "," + nots;
+                    }
+                    pendingBill.setBillOrderNote(note);
+                    realm.commitTransaction();
+                    for (BillOrderProduct billNew : kotBill.getBillOrderProductList()) {
+                        int temp2 = 0;
+                        for (BillOrderProduct billOld : pendingBill.getBillOrderProductList()) {
+
+                            if (billNew.getBillOrderProductId() == billOld.getBillOrderProductId()) {
+                                temp2 = 1;
+                                Long oldQty = billOld.getBillOrderProductQty();
+                                Long newQty = billNew.getBillOrderProductQty();
+                                Long temp = oldQty + newQty;
+                                RealmQuery.addRecord(pendingId, billNew.getBillOrderProductId(), true, billOld.getBillOrderProductName(), billNew.getBillOrderProductDescription(), temp, billNew.getBillOrderProductPrice(), billNew.getBillOrderProductCategoryId(), billNew.getBillOrderProductCategory());
+                                KLog.e(billNew.getBillOrderProductId() + "  print id equals IF  old " + oldQty + "  new   " + newQty + "  Id  " + temp + "   " + billOld.getBillOrderProductId());
+                                break;
+                            }
+
+                            // KLog.e(billNew.getBillOrderProductId() + "  print id " + billOld.getBillOrderProductId());
+                        }
+                        if (temp2 == 0) {
+                            RealmQuery.addRecord(pendingId, billNew.getBillOrderProductId(), true, billNew.getBillOrderProductName(), billNew.getBillOrderProductDescription(), billNew.getBillOrderProductQty(), billNew.getBillOrderProductPrice(), billNew.getBillOrderProductCategoryId(), billNew.getBillOrderProductCategory());
+                            // KLog.e(billNew.getBillOrderProductId() + "  print id  equals Else " + billOld.getBillOrderProductId());
+                        }
+
+                    }
+                }
+
+                finish();
+            } else {
+                Toast.makeText(ProApplication.getContex(), "Something wrong check your printer", Toast.LENGTH_SHORT).show();
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    /*PrintDailyKOTReports*/
+    public void printDailyKOT(String date) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+
+                    Realm realm = Realm.getDefaultInstance();
+                    BillOrder order = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, 0).findFirst();
+                    if (order != null) {
+                        realm.beginTransaction();
+                        order.getBillOrderProductList().deleteAllFromRealm();
+                        order.deleteFromRealm();
+                        realm.commitTransaction();
+                    }
+                    //  RealmResults<BillOrder> billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERDATEONLY, date).and().equalTo(BillOrder.BILLORDERSTATUS, "Complete").findAll();
+                    RealmResults<BillOrderProduct> billOrderProducts = realm.where(BillOrderProduct.class).distinct(BillOrderProduct.BILLORDERPRODUCTNAME).findAll();
+                    if (billOrderProducts.size() > 0) {
+
+                        String method = "";
+                        String space = " ";
+                        String totalTag = "";
+                        int totalProduct = 0;
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+
+                            method = "addText";
+                            printCustom("K.O.T items report", 2, 1);
+                            printCustom("  ", 0, 0);
+                            method = "addTextAlign";
+
+                            printText("Date:" + date);
+                            printNewLine();
+                 /*   method = "addText";
+                    this.mPrinter.addText("Total K.O.T:" + 0 + "\n");*/
+                            if (billOrderProducts.size() > 0) {
+                                method = "addText";
+                                printText("Total Item:" + billOrderProducts.size());
+                                printNewLine();
+                            }
+                            method = "addText";
+                            printText(divederline48);
+                            method = "addText";
+                            printText("ITEM                                         QTY");
+                            method = "addText";
+                            printText(divederline48);
+
+                            for (BillOrderProduct orderProduct : billOrderProducts) {
+                                Number billOrderProduct = realm.where(BillOrderProduct.class).equalTo(BillOrderProduct.BILLORDERPRODUCTNAME, orderProduct.getBillOrderProductName()).sum(BillOrderProduct.BILLORDERPRODUCTQTY);
+
+                                String productName, Qty;
+
+                                if (orderProduct.getBillOrderProductName().length() > 40) {
+                                    productName = orderProduct.getBillOrderProductName().substring(0, 37) + "...";
+                                } else {
+                                    productName = orderProduct.getBillOrderProductName();
+                                }
+                                int diff = 40 - productName.length();
+                                String pSpace = "";
+                                for (int pName = 0; pName < diff; pName++) {
+                                    pSpace = pSpace + space;
+                                }
+                                productName = productName + pSpace;
+
+                                int dateDiff = 8 - String.valueOf(billOrderProduct).length();
+                                String dateSpace = "";
+                                for (int Pqty = 0; Pqty < dateDiff; Pqty++) {
+                                    dateSpace = dateSpace + space;
+                                }
+                                Qty = dateSpace + Integer.valueOf(billOrderProduct + "");
+
+
+                                totalProduct = totalProduct + Integer.valueOf(billOrderProduct + "");
+                                method = "addText";
+                                printText(productName + Qty);
+
+                            }
+                            method = "addText";
+
+                            printText(divederline48);
+                            String spaceBwTotal = "";
+
+                            for (int p = 0; p < 48 - ("Total Product Quanity".length() + String.valueOf(totalProduct).length()); p++) {
+                                spaceBwTotal = spaceBwTotal + space;
+                            }
+                            method = "addText";
+                            printText("Total Product Quanity" + spaceBwTotal + totalProduct);
+                            method = "addFeedLine";
+                            printNewLine();
+                            printNewLine();
+                            printNewLine();
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                    } else {
+                    }
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            //finish();
+        } catch (
+                InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    /*PrintDilyReports*/
+    public void printDailyReport(String date) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+
+                    Realm realm = Realm.getDefaultInstance();
+                    // RealmResults<BillOrder> billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERDATEONLY, date).findAll();
+                    RealmResults<BillOrder> billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERDATEONLY, date).and().equalTo(BillOrder.BILLORDERSTATUS, "Complete").findAll();
+                    if (billOrder.size() > 0) {
+
+
+                        String method = "";
+                        String space = " ";
+                        long Card = 0, Paytm = 0, Cash = 0;
+                        long totalAmount = 0, SGST = 0, CGST = 0;
+                        String space27 = "                           ";
+                        String divederline48 = "------------------------------------------------";
+
+                        method = "addTextAlign";
+                        try {
+
+                            method = "addText";
+                            printCustom("Daily Order Report", 2, 1);
+                            printCustom("  ", 0, 0);
+                            method = "addTextAlign";
+
+                            printText("Date:" + date + "");
+                            printNewLine();
+                            method = "addText";
+                            printText("Total Order:" + billOrder.size() + "");
+                            printNewLine();
+
+                            method = "addText";
+                            printText(divederline48);
+                            method = "addText";
+                            printText("ORDERID      PAYMENT_MODE                 AMOUNT");
+                            method = "addText";
+                            printText(divederline48);
+
+                            for (int i = 0; i < billOrder.size(); i++) {
+
+                                space = " ";
+
+                                String orderId, payment, status, amount;
+
+                                int diff = 13 - String.valueOf(billOrder.get(i).getBillId()).length();
+                                String pSpace = "";
+                                for (int pName = 0; pName < diff; pName++) {
+                                    pSpace = pSpace + space;
+                                }
+                                orderId = billOrder.get(i).getBillId() + pSpace;
+
+                                int diffPayment;
+                                if (billOrder.get(i).getBillOrderPaymentMode() != null) {
+                                    diffPayment = 20 - billOrder.get(i).getBillOrderPaymentMode().length();
+                                    payment = billOrder.get(i).getBillOrderPaymentMode();
+                                } else {
+                                    diffPayment = 20 - "-".length();
+                                    payment = "-";
+
+                                }
+                                String PaymentSpace = "";
+                                for (int pName = 0; pName < diffPayment; pName++) {
+                                    PaymentSpace = PaymentSpace + space;
+                                }
+                                payment = payment + PaymentSpace;
+
+                       /* int diffStatus = 13 - billOrder.get(i).getBillOrderStatus().length();
+                        String StatusSpace = "";
+                        for (int pName = 0; pName < diffStatus; pName++) {
+                            StatusSpace = StatusSpace + space;
+                        }
+                        status = billOrder.get(i).getBillOrderStatus() + StatusSpace;
+*/
+
+                                int Amountdiff = 15 - billOrder.get(i).getBillOrderTotal().length();
+                                String AmountSpace = "";
+                                for (int pName = 0; pName < Amountdiff; pName++) {
+                                    AmountSpace = AmountSpace + space;
+                                }
+                                amount = AmountSpace + billOrder.get(i).getBillOrderTotal();
+
+                                method = "addText";
+
+                                printText(orderId + payment + amount);
+
+                                totalAmount = totalAmount + Long.valueOf(billOrder.get(i).getBillOrderTotal());
+
+                                if (billOrder.get(i).getBillOrderPaymentMode().equalsIgnoreCase("card")) {
+
+                                    Card = Card + Long.valueOf(billOrder.get(i).getBillOrderTotal());
+
+                                } else if (billOrder.get(i).getBillOrderPaymentMode().equalsIgnoreCase("paytm")) {
+
+                                    Paytm = Paytm + Long.valueOf(billOrder.get(i).getBillOrderTotal());
+
+                                } else {
+                                    Cash = Cash + Long.valueOf(billOrder.get(i).getBillOrderTotal());
+                                }
+                                if (billOrder.get(i).getBillOrderSGST() != null) {
+                                    SGST = SGST + Long.valueOf(billOrder.get(i).getBillOrderSGST());
+                                    CGST = CGST + Long.valueOf(billOrder.get(i).getBillOrderCGST());
+                                }
+                            }
+
+                            method = "addText";
+                            printText(divederline48);
+
+
+                            /*Te*/
+                            int gst = 48 - ("Total SGST".length() + String.valueOf(SGST).length());
+                            String gstDiff = "";
+                            for (int del = 0; del < gst; del++) {
+                                gstDiff = gstDiff + space;
+                            }
+                            printText("Total SGST" + gstDiff + SGST);
+                            printText("Total CGST" + gstDiff + CGST);
+
+
+
+                            /*payment mode*/
+                            int CardTag = 48 - ("Total Card Payment".length() + String.valueOf(Card).length());
+                            String cardDiff = "";
+                            for (int del = 0; del < CardTag; del++) {
+                                cardDiff = cardDiff + space;
+                            }
+                            printText("Total Card Payment" + cardDiff + Card);
+
+
+                            int itemcash = 48 - ("Total Cash Payment".length() + String.valueOf(Cash).length());
+                            String caseDiff = "";
+                            for (int del = 0; del < itemcash; del++) {
+                                caseDiff = caseDiff + space;
+                            }
+                            printText("Total Cash Payment" + caseDiff + Cash);
+
+
+                            int patmTag = 48 - ("Total Paytm Payment".length() + String.valueOf(Paytm).length());
+                            String paytmDiff = "";
+                            for (int del = 0; del < patmTag; del++) {
+                                paytmDiff = paytmDiff + space;
+                            }
+                            printText("Total Paytm Payment" + paytmDiff + Paytm);
+
+                            int itemTag = 48 - ("Grand Total".length() + String.valueOf(totalAmount).length());
+                            String itemDiff = "";
+                            for (int del = 0; del < itemTag; del++) {
+                                itemDiff = itemDiff + space;
+                            }
+                            printText("Grand Total" + itemDiff + totalAmount);
+
+                            method = "addFeedLine";
+                            printNewLine();
+                            printNewLine();
+                            printNewLine();
+                            method = "addCut";
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                        //  return true;
+
+                    } else {
+                        Toast.makeText(ProApplication.getContex(), "Record not found", Toast.LENGTH_SHORT).show();
+                        // return false;
+                    }
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            //finish();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    /*PRintDailyPRoduct*/
+    public void printDailyProduct(String date) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+
+                    Realm realm = Realm.getDefaultInstance();
+                    BillOrder order = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERID, 0).findFirst();
+                    if (order != null) {
+                        realm.beginTransaction();
+                        order.getBillOrderProductList().deleteAllFromRealm();
+                        order.deleteFromRealm();
+                        realm.commitTransaction();
+                    }
+                    //  RealmResults<BillOrder> billOrder = realm.where(BillOrder.class).equalTo(BillOrder.BILLORDERDATEONLY, date).and().equalTo(BillOrder.BILLORDERSTATUS, "Complete").findAll();
+                    RealmResults<BillOrderProduct> billOrderProducts = realm.where(BillOrderProduct.class).distinct(BillOrderProduct.BILLORDERPRODUCTNAME).findAll();
+                    if (billOrderProducts.size() > 0) {
+
+
+                        String method = "";
+                        String space = " ";
+                        String totalTag = "";
+                        int totalProduct = 0;
+                        String space18 = "                  ";
+                        String space27 = "                           ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+                            printCustom("Invoiced items report", 2, 1);
+                            printCustom("  ", 0, 0);
+                            method = "addTextAlign";
+                            printText("Date:" + date);
+                            printNewLine();
+                 /*   method = "addText";
+                    this.mPrinter.addText("Total K.O.T:" + 0 + "\n");*/
+                            if (billOrderProducts.size() > 0) {
+                                method = "addText";
+                                printText("Total Item:" + billOrderProducts.size());
+                                printNewLine();
+                            }
+                            method = "addText";
+                            printText(divederline48);
+                            method = "addText";
+                            printText("ITEM                                         QTY");
+                            method = "addText";
+                            printText(divederline48);
+
+                            for (BillOrderProduct orderProduct : billOrderProducts) {
+                                Number billOrderProduct = realm.where(BillOrderProduct.class).equalTo(BillOrderProduct.BILLORDERPRODUCTNAME, orderProduct.getBillOrderProductName()).equalTo(BillOrderProduct.BILLORDERPRODUCTSTATUS, "Complete").sum(BillOrderProduct.BILLORDERPRODUCTQTY);
+
+                                if (Long.valueOf(billOrderProduct + "") != 0) {
+                                    String productName, Qty;
+
+                                    if (orderProduct.getBillOrderProductName().length() > 40) {
+                                        productName = orderProduct.getBillOrderProductName().substring(0, 37) + "...";
+                                    } else {
+                                        productName = orderProduct.getBillOrderProductName();
+                                    }
+                                    int diff = 40 - productName.length();
+                                    String pSpace = "";
+                                    for (int pName = 0; pName < diff; pName++) {
+                                        pSpace = pSpace + space;
+                                    }
+                                    productName = productName + pSpace;
+
+                                    int dateDiff = 8 - String.valueOf(billOrderProduct).length();
+                                    String dateSpace = "";
+                                    for (int Pqty = 0; Pqty < dateDiff; Pqty++) {
+                                        dateSpace = dateSpace + space;
+                                    }
+                                    Qty = dateSpace + Integer.valueOf(billOrderProduct + "");
+
+
+                                    totalProduct = totalProduct + Integer.valueOf(billOrderProduct + "");
+                                    method = "addText";
+                                    printText(productName + Qty);
+
+                                }
+                            }
+                            method = "addText";
+
+                            printText(divederline48);
+                            String spaceBwTotal = "";
+
+                            for (int p = 0; p < 48 - ("Total Product Quanity".length() + String.valueOf(totalProduct).length()); p++) {
+                                spaceBwTotal = spaceBwTotal + space;
+                            }
+                            method = "addText";
+                            printText("Total Product Quanity" + spaceBwTotal + totalProduct);
+                            method = "addFeedLine";
+                            printNewLine();
+                            printNewLine();
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                    }
+
+
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            //finish();
+        } catch (
+                InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    /*Monthly bill*/
+    public void printMonthlyBill(List<DateMonthlyDisplay> list) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+
+                    if (list.size() != 0) {
+                        long total = 0, allBillsTotal = 0;
+                        String space = " ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+
+
+                            printCustom("Bollywood Lounge", 2, 1);
+                            printCustom("  ", 0, 0);
+                            printText("Monthly Report");
+                            printNewLine();
+                            printText(divederline48);
+                            printText("Bills       Date                    Total Amount");
+                            printText(divederline48);
+
+                            for (int i = 0; i < list.size(); i++) {
+
+                                String totalBills, date, Amount;
+
+                                int diff = 12 - list.get(i).getTotalBill().length();
+                                String pSpace = "";
+                                for (int pName = 0; pName < diff; pName++) {
+                                    pSpace = pSpace + space;
+                                }
+                                totalBills = list.get(i).getTotalBill() + pSpace;
+
+                                int dateDiff = 18 - list.get(i).getDate().length();
+
+                                String dateSpace = "";
+                                for (int Pqty = 0; Pqty < dateDiff; Pqty++) {
+                                    dateSpace = dateSpace + space;
+                                }
+                                date = list.get(i).getDate() + dateSpace;
+
+                                int amountCount = 18 - list.get(i).getTotalAmount().length();
+                                String pAmount = "";
+                                for (int pam = 0; pam < amountCount; pam++) {
+                                    pAmount = pAmount + space;
+                                }
+                                Amount = pAmount + list.get(i).getTotalAmount();
+
+                                printText(totalBills + date + Amount);
+
+                                total = total + Long.valueOf(list.get(i).getTotalAmount());
+
+                                allBillsTotal = allBillsTotal + Long.valueOf(list.get(i).getTotalBill());
+                            }
+                            printText(divederline48);
+
+                            int itemtotal = 48 - ("Total Bills".length() + String.valueOf(allBillsTotal).length());
+                            String itemtotals = "";
+                            for (int del = 0; del < itemtotal; del++) {
+                                itemtotals = itemtotals + space;
+                            }
+                            printText("Total Bills" + itemtotals + allBillsTotal);
+
+
+                            int itemTag = 48 - ("Grand Total".length() + String.valueOf(total).length());
+                            String itemDiff = "";
+                            for (int del = 0; del < itemTag; del++) {
+                                itemDiff = itemDiff + space;
+                            }
+                            printText("Grand Total" + itemDiff + total);
+
+                            printText(divederline48);
+
+                            //this.mPrinter.addTextAlign(Printer.ALIGN_CENTER);
+                            // this.mPrinter.addTextSize(1, 2);
+                            //this.mPrinter.addText(getMessage() + "\n\n");
+
+
+                            printNewLine();
+                            printNewLine();
+
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                        //return true;
+                    }
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            //finish();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+
+    public void printMonthlyKOT(List<DateMonthlyDisplay> list) {
+        Thread t = new Thread() {
+            public void run() {
+                try {
+
+                    if (list.size() != 0) {
+                        long total = 0, allBillsTotal = 0;
+                        String space = " ";
+                        String divederline48 = "------------------------------------------------";
+
+                        try {
+
+                            printCustom("Bollywood Lounge", 2, 1);
+                            printCustom("  ", 0, 0);
+                            printText("Monthly KOT Report");
+                            printNewLine();
+
+                            printText(divederline48);
+                            printText("KOT         Date                     TOTAL_ITEMS");
+                            printText(divederline48);
+
+                            for (int i = 0; i < list.size(); i++) {
+
+                                String totalBills, date, Amount;
+
+                                int diff = 12 - list.get(i).getTotalBill().length();
+                                String pSpace = "";
+                                for (int pName = 0; pName < diff; pName++) {
+                                    pSpace = pSpace + space;
+                                }
+                                totalBills = list.get(i).getTotalBill() + pSpace;
+
+                                int dateDiff = 18 - list.get(i).getDate().length();
+
+                                String dateSpace = "";
+                                for (int Pqty = 0; Pqty < dateDiff; Pqty++) {
+                                    dateSpace = dateSpace + space;
+                                }
+                                date = list.get(i).getDate() + dateSpace;
+
+                                int amountCount = 18 - list.get(i).getTotalAmount().length();
+                                String pAmount = "";
+                                for (int pam = 0; pam < amountCount; pam++) {
+                                    pAmount = pAmount + space;
+                                }
+                                Amount = pAmount + list.get(i).getTotalAmount();
+
+                                printText(totalBills + date + Amount);
+
+                                total = total + Long.valueOf(list.get(i).getTotalAmount());
+
+                                allBillsTotal = allBillsTotal + Long.valueOf(list.get(i).getTotalBill());
+                            }
+                            printText(divederline48);
+
+                            int itemtotal = 48 - ("Total KOT".length() + String.valueOf(allBillsTotal).length());
+                            String itemtotals = "";
+                            for (int del = 0; del < itemtotal; del++) {
+                                itemtotals = itemtotals + space;
+                            }
+                            printText("Total KOT" + itemtotals + allBillsTotal);
+
+
+                            int itemTag = 48 - ("Total Items".length() + String.valueOf(total).length());
+                            String itemDiff = "";
+                            for (int del = 0; del < itemTag; del++) {
+                                itemDiff = itemDiff + space;
+                            }
+                            printText("Total Items" + itemDiff + total);
+
+                            printText(divederline48);
+
+                            //this.mPrinter.addTextAlign(Printer.ALIGN_CENTER);
+                            // this.mPrinter.addTextSize(1, 2);
+                            //this.mPrinter.addText(getMessage() + "\n\n");
+                            printNewLine();
+                            printNewLine();
+                        } catch (Exception e) {
+                            KLog.e("Error", e.getMessage());
+                        }
+                    }
+
+                } catch (Exception e) {
+                    // return false;
+                }
+            }
+        };
+        t.start();
+
+
+        try {
+            t.join(0);
+            //finish();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+}
